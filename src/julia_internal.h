@@ -1482,7 +1482,7 @@ void jl_register_fptrs(uint64_t sysimage_base, const struct _jl_sysimg_fptrs_t *
                        jl_method_instance_t **linfos, size_t n);
 void jl_write_coverage_data(const char*);
 void jl_write_malloc_log(void);
-void jl_write_compiler_output(void);
+// void jl_write_compiler_output(void);
 
 #if jl_has_builtin(__builtin_unreachable) || defined(_COMPILER_GCC_) || defined(_COMPILER_INTEL_)
 #  define jl_unreachable() __builtin_unreachable()

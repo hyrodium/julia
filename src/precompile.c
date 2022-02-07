@@ -22,7 +22,7 @@ JL_DLLEXPORT int jl_generating_output(void)
 
 static void *jl_precompile(int all);
 
-void jl_write_compiler_output(void)
+JL_DLLEXPORT void jl_write_compiler_output(void)
 {
     if (!jl_generating_output()) {
         return;

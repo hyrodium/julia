@@ -1729,6 +1729,9 @@ JL_DLLEXPORT int jl_save_incremental(const char *fname, jl_array_t *worklist);
 JL_DLLEXPORT jl_value_t *jl_restore_incremental(const char *fname, jl_array_t *depmods);
 JL_DLLEXPORT jl_value_t *jl_restore_incremental_from_buf(const char *buf, size_t sz, jl_array_t *depmods);
 
+// temporary (for gdb, delete later)
+JL_DLLEXPORT void jl_write_compiler_output(void);
+
 // parsing
 JL_DLLEXPORT jl_value_t *jl_parse_all(const char *text, size_t text_len,
                                       const char *filename, size_t filename_len, size_t lineno);

@@ -322,14 +322,22 @@ static inline std::vector<T*> consume_gv(Module &M, const char *name)
     // Strip them from the Module so that it's easier to handle the uses.
     GlobalVariable *gv = M.getGlobalVariable(name);
     assert(gv && gv->hasInitializer());
-    auto *ary = cast<ConstantArray>(gv->getInitializer());
-    unsigned nele = ary->getNumOperands();
+    ArrayType *Ty = cast<ArrayType>(gv->getInitializer()->getType());
+    unsigned nele = Ty->getArrayNumElements();
     std::vector<T*> res(nele);
-    for (unsigned i = 0; i < nele; i++)
-        res[i] = cast<T>(ary->getOperand(i)->stripPointerCasts());
+    ConstantArray *ary = nullptr;
+    if (gv->getInitializer()->isNullValue()) {
+        for (unsigned i = 0; i < nele; ++i)
+            res[i] = cast<T>(Constant::getNullValue(Ty->getArrayElementType()));
+    }
+    else {
+        ary = cast<ConstantArray>(gv->getInitializer());
+        for (unsigned i = 0; i < nele; ++i)
+            res[i] = cast<T>(ary->getOperand(i)->stripPointerCasts());
+    }
     assert(gv->use_empty());
     gv->eraseFromParent();
-    if (ary->use_empty())
+    if (ary && ary->use_empty())
         ary->destroyConstant();
     return res;
 }

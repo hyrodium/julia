@@ -6421,6 +6421,8 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
         funcName << "japi3_";
     else
         funcName << "japi1_";
+    if (jl_precompile_toplevel_module != NULL)
+        funcName << jl_precompile_toplevel_module->build_id << "_";
     const char* unadorned_name = ctx.name;
 #if defined(_OS_LINUX_)
     if (unadorned_name[0] == '@')

@@ -397,6 +397,7 @@
     XX(jl_restore_excstack) \
     XX(jl_restore_incremental) \
     XX(jl_restore_incremental_from_buf) \
+    XX(jl_restore_package_image_from_file) \
     XX(jl_restore_system_image) \
     XX(jl_restore_system_image_data) \
     XX(jl_rethrow) \

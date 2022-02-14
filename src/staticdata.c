@@ -1440,12 +1440,8 @@ static void jl_read_relocations(jl_serializer_state *s, uint8_t bits)
     }
 }
 
-static char* sysimg_base;
-static char* sysimg_relocs;
-void gc_sweep_sysimg(void)
+void gc_sweep_sysimg_(uintptr_t base, uintptr_t relocs)
 {
-    uintptr_t base = (uintptr_t)sysimg_base;
-    uintptr_t relocs = (uintptr_t)sysimg_relocs;
     if (relocs == 0)
         return;
     while (1) {
@@ -1455,6 +1451,13 @@ void gc_sweep_sysimg(void)
         jl_taggedvalue_t *o = (jl_taggedvalue_t*)(base + offset);
         o->bits.gc = GC_OLD;
     }
+}
+
+static char* sysimg_base;
+static char* sysimg_relocs;
+void gc_sweep_sysimg(void)
+{
+    gc_sweep_sysimg_((uintptr_t)sysimg_base, (uintptr_t)sysimg_relocs);
 }
 
 #define jl_write_value(s, v) _jl_write_value((s), (jl_value_t*)(v))
@@ -2494,6 +2497,26 @@ JL_DLLEXPORT void jl_restore_system_image_data(const char *buf, size_t len)
     ios_close(&f);
     JL_SIGATOMIC_END();
 }
+
+// JL_DLLEXPORT void jl_restore_package_image(const char *fname)
+// {
+//     ios_t f;
+//     if (ios_file(&f, fname, 1, 0, 0, 0) == NULL)
+//         jl_errorf("Package image file \"%s\" not found.", fname);
+//     ios_bufmode(&f, bm_none);
+//     JL_SIGATOMIC_BEGIN();
+//     ios_seek_end(&f);
+//     size_t len = ios_pos(&f);
+//     char *sysimg = (char*)jl_gc_perm_alloc(len, 0, 64, 0);
+//     ios_seek(&f, 0);
+//     if (ios_readall(&f, sysimg, len) != len)
+//         jl_errorf("Error reading package image file.");
+//     ios_close(&f);
+//     ios_static_buffer(&f, sysimg, len);
+//     jl_restore_package_image_from_stream(&f);
+//     ios_close(&f);
+//     JL_SIGATOMIC_END();
+// }
 
 void jl_restore_package_image_data_(const char *buf, size_t len)
 {

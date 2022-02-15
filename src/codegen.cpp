@@ -4388,8 +4388,9 @@ static void emit_varinfo_assign(jl_codectx_t &ctx, jl_varinfo_t &vi, jl_cgval_t 
 static void emit_binding_store(jl_codectx_t &ctx, jl_binding_t *bnd, Value *bp, jl_value_t *r, ssize_t ssaval, AtomicOrdering Order)
 {
     assert(bnd);
-    Value *rval = boxed(ctx, emit_expr(ctx, r, ssaval));
-    if (!bnd->constp && bnd->ty && jl_isa(r, bnd->ty)) {
+    jl_cgval_t rval_info = emit_expr(ctx, r, ssaval);
+    Value *rval = boxed(ctx, rval_info);
+    if (!bnd->constp && bnd->ty && jl_subtype(rval_info.typ, bnd->ty)) {
         StoreInst *v = ctx.builder.CreateAlignedStore(rval, bp, Align(sizeof(void*)));
         v->setOrdering(Order);
         tbaa_decorate(ctx.tbaa().tbaa_binding, v);

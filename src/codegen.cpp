@@ -4376,6 +4376,22 @@ static void emit_varinfo_assign(jl_codectx_t &ctx, jl_varinfo_t &vi, jl_cgval_t 
     }
 }
 
+static void emit_binding_store(jl_codectx_t &ctx, jl_binding_t *bnd, Value *bp, jl_value_t *r, ssize_t ssaval, AtomicOrdering Order)
+{
+    assert(bnd);
+    Value *rval = boxed(ctx, emit_expr(ctx, r, ssaval));
+    if (!bnd->constp && bnd->ty && jl_isa(r, bnd->ty)) {
+        StoreInst *v = ctx.builder.CreateAlignedStore(rval, bp, Align(sizeof(void*)));
+        v->setOrdering(Order);
+        //tbaa_decorate(ctx.tbaa().tbaa_binding, v);
+    }
+    else {
+        ctx.builder.CreateCall(prepare_call(jlcheckassign_func),
+                               { literal_pointer_val(ctx, bnd),
+                                 mark_callee_rooted(ctx, rval) });
+    }
+}
+
 static void emit_assignment(jl_codectx_t &ctx, jl_value_t *l, jl_value_t *r, ssize_t ssaval)
 {
     assert(!jl_is_ssavalue(l));
@@ -4392,11 +4408,7 @@ static void emit_assignment(jl_codectx_t &ctx, jl_value_t *l, jl_value_t *r, ssi
     if (bp == NULL && s != NULL)
         bp = global_binding_pointer(ctx, ctx.module, s, &bnd, true);
     if (bp != NULL) { // it's a global
-        assert(bnd);
-        Value *rval = mark_callee_rooted(ctx, boxed(ctx, emit_expr(ctx, r, ssaval)));
-        ctx.builder.CreateCall(prepare_call(jlcheckassign_func),
-                           { literal_pointer_val(ctx, bnd),
-                             rval });
+        emit_binding_store(ctx, bnd, bp, r, ssaval, AtomicOrdering::Unordered);
         // Global variable. Does not need debug info because the debugger knows about
         // its memory location.
         return;

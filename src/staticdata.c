@@ -7,14 +7,17 @@
   dump.c has no knowledge of native code (and simply discards it), whereas this supports native code caching in .o files.
   Duplication is avoided by elevating the .o-serialized versions of global variables and native-compiled functions to become
   the authoritative source for such entities in the system image, with references to these objects appropriately inserted into
-  the (de)serialized version of Julia's internal data. This makes deserialization simple and fast: we only need to deal with
-  pointer relocation, registering with the garbage collector, and making note of special internal types. During serialization,
-  we also need to pay special attention to things like builtin functions, C-implemented types (those in jltypes.c), the metadata
-  for documentation, optimal layouts, integration with native system image generation, and preparing other preprocessing
-  directives.
+  the (de)serialized version of Julia's internal data.
 
-  dump.c has capabilities missing from this serializer, most notably the ability to handle external references. This is not needed
-  for system images as they are self-contained. However, it would be needed to support incremental compilation of packages.
+  Another difference is that while dump.c defines a serialization format that it writes item-by-item, this serializer creates and
+  saves a compact binary blob. This makes deserialization simple and fast: we only need to deal with pointer relocation,
+  registering with the garbage collector, and making note of special internal types. During serialization, we also need to
+  pay special attention to things like builtin functions, C-implemented types (those in jltypes.c), the metadata for documentation,
+  optimal layouts, integration with native system image generation, and preparing other preprocessing directives.
+
+  dump.c has capabilities missing from this serializer, most notably the ability to manage (and merge) method tables.
+  This is not needed for system images as they are self-contained. However, it would be needed to support incremental
+  compilation of packages.
 
   During serialization, the flow has several steps:
 
@@ -288,6 +291,15 @@ static arraylist_t reinit_list;
 // @ccallable entry points to install
 static arraylist_t ccallable_list;
 
+// record of build_ids for all external linkages, in order of need
+jl_array_t *link_ids = NULL;
+static int link_index = 0;
+
+// Permanent list of void* (begin, end+1) pairs of system/package images we've loaded previously
+// togther with their module build_ids (used for external linkage)
+arraylist_t jl_linkage_blobs;
+jl_array_t *jl_build_ids JL_GLOBALLY_ROOTED = NULL;
+
 // hash of definitions for predefined function pointers
 static htable_t fptr_to_id;
 void *native_functions;   // opaque jl_native_code_desc_t blob used for fetching data from LLVM
@@ -334,13 +346,14 @@ static jl_sym_t *jl_docmeta_sym = NULL;
 // Tags of category `t` are located at offsets `t << RELOC_TAG_OFFSET`
 // Consequently there is room for 2^RELOC_TAG_OFFSET pointers, etc
 enum RefTags {
-    DataRef,           // mutable data
-    ConstDataRef,      // constant data (e.g., layouts)
-    TagRef,            // items serialized via their tags
-    SymbolRef,         // symbols
-    BindingRef,        // module bindings
-    FunctionRef,       // generic functions
-    BuiltinFunctionRef // builtin functions
+    DataRef,            // mutable data
+    ConstDataRef,       // constant data (e.g., layouts)
+    TagRef,             // items serialized via their tags
+    SymbolRef,          // symbols
+    BindingRef,         // module bindings
+    FunctionRef,        // generic functions
+    BuiltinFunctionRef, // builtin functions
+    ExternalLinkage     // items defined externally (packages/sysimg)
 };
 
 // calling conventions for internal entry points.
@@ -674,6 +687,23 @@ static void write_pointer(ios_t *s) JL_NOTSAFEPOINT
     write_padding(s, sizeof(void*));
 }
 
+// Compared to internal references, external links require one additional piece of information
+// for succesful relocation, the sysimg/pkgimg that is being linked against. This is stored in `link_ids`.
+static uintptr_t encode_external_link(jl_serializer_state *s, jl_value_t *v)
+{
+    size_t i;
+    uint64_t *link_id_data  = (uint64_t*)jl_array_data(link_ids);
+    uint64_t *build_id_data = (uint64_t*)jl_array_data(jl_build_ids);
+    for (i = 0; i < jl_linkage_blobs.len; i+=2)
+        if (jl_linkage_blobs.items[i] <= (void*)v && (void*)v < jl_linkage_blobs.items[i+1]) {
+            // We found the sysimg/pkg that this item links against
+            jl_array_grow_end(link_ids, 1);
+            link_id_data[jl_array_len(link_ids)-1] = build_id_data[i>>1];
+            return ((uintptr_t)ExternalLinkage << RELOC_TAG_OFFSET) + ((char*)v - (char*)(jl_linkage_blobs.items[i]));
+        }
+    jl_error("object missed during jl_serialize_value pass and no external linkage identified");
+}
+
 // Return the integer `id` for `v`. Generically this is looked up in `backref_table`,
 // but symbols, small integers, and a couple of special items (`nothing` and the root Task)
 // have special handling.
@@ -718,8 +748,7 @@ static uintptr_t _backref_id(jl_serializer_state *s, jl_value_t *v) JL_NOTSAFEPO
     if (idx == HT_NOTFOUND) {
         idx = ptrhash_get(&backref_table, v);
         if (idx == HT_NOTFOUND)
-            jl_(v);
-        assert(idx != HT_NOTFOUND && "object missed during jl_serialize_value pass");
+            return encode_external_link(s, v);
     }
     return (char*)idx - 1 - (char*)HT_NOTFOUND;
 }
@@ -1309,6 +1338,7 @@ static uintptr_t get_reloc_for_item(uintptr_t reloc_item, size_t reloc_offset)
         size_t offset = (reloc_item & (((uintptr_t)1 << RELOC_TAG_OFFSET) - 1));
         switch (tag) {
         case ConstDataRef:
+        case ExternalLinkage:
             break;
         case SymbolRef:
             assert(offset < nsym_tag && "corrupt relocation item id");
@@ -1392,6 +1422,22 @@ static inline uintptr_t get_item_for_reloc(jl_serializer_state *s, uintptr_t bas
         //default:
             assert("corrupt relocation item id");
         }
+    case ExternalLinkage:
+        assert(link_ids);
+        assert(jl_build_ids);
+        uint64_t *link_id_data  = (uint64_t*)jl_array_data(link_ids);
+        uint64_t *build_id_data = (uint64_t*)jl_array_data(jl_build_ids);
+        assert(0 <= link_index && link_index < jl_array_len(link_ids));
+        uint64_t build_id = link_id_data[link_index++];
+        size_t i = 0, nids = jl_array_len(jl_build_ids);
+        while (i < nids) {
+            if (build_id == build_id_data[i])
+                break;
+            i++;
+        }
+        assert(i < nids);
+        assert(2*i < jl_linkage_blobs.len);
+        return (uintptr_t)jl_linkage_blobs.items[2*i] + offset;
     }
     abort();
 }
@@ -1846,6 +1892,8 @@ static void jl_save_system_image_to_stream(ios_t *f) JL_GC_DISABLED
     arraylist_new(&reinit_list, 0);
     arraylist_new(&ccallable_list, 0);
     arraylist_new(&object_worklist, 0);
+    assert(link_ids == NULL);
+    link_ids = jl_alloc_array_1d(jl_array_uint64_type, 0);
     backref_table_numel = 0;
     ios_t sysimg, const_data, symbols, relocs, gvar_record, fptr_record;
     ios_mem(&sysimg,     1000000);
@@ -1979,6 +2027,8 @@ static void jl_save_system_image_to_stream(ios_t *f) JL_GC_DISABLED
         write_uint32(f, jl_get_gs_ctr());
         write_uint32(f, jl_atomic_load_acquire(&jl_world_counter));
         write_uint32(f, jl_typeinf_world);
+        write_uint32(f, jl_array_len(link_ids));
+        ios_write(f, (char*)jl_array_data(link_ids), jl_array_len(link_ids)*sizeof(uint64_t));
         jl_finalize_serializer(&s, &reinit_list);
         jl_finalize_serializer(&s, &ccallable_list);
     }
@@ -1991,6 +2041,7 @@ static void jl_save_system_image_to_stream(ios_t *f) JL_GC_DISABLED
     arraylist_free(&s.relocs_list);
     arraylist_free(&s.gctags_list);
     htable_free(&field_replace);
+    link_ids = NULL;
     jl_cleanup_serializer2();
 
     jl_gc_enable(en);
@@ -2269,6 +2320,13 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     jl_atomic_store_release(&jl_world_counter, read_uint32(f));
     jl_typeinf_world = read_uint32(f);
     jl_set_gs_ctr(gs_ctr);
+    assert(link_ids == NULL);
+    size_t nlinks = read_uint32(f);
+    if (nlinks > 0) {
+        link_ids = jl_alloc_array_1d(jl_array_uint64_type, nlinks);
+        ios_read(f, (char*)jl_array_data(link_ids), nlinks * sizeof(uint64_t));
+    }
+    link_index = 0;
     s.s = NULL;
 
     // step 3: apply relocations
@@ -2324,10 +2382,21 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     ios_close(&fptr_record);
     ios_close(&sysimg);
     s.s = NULL;
+    link_ids = NULL;
 
     jl_gc_reset_alloc_count();
     jl_gc_enable(en);
     jl_cleanup_serializer2();
+
+    // Prepare for later external linkage against the sysimg
+    arraylist_push(&jl_linkage_blobs, sysimg_base);
+    arraylist_push(&jl_linkage_blobs, sysimg_base + sysimg.size);
+    assert(jl_build_ids == NULL);
+    jl_build_ids = jl_alloc_array_1d(jl_array_uint64_type, 0);
+    jl_array_grow_end(jl_build_ids, 1);
+    uint64_t *build_id_data = (uint64_t*)jl_array_data(jl_build_ids);
+    assert(jl_array_len(jl_build_ids) == 1);
+    build_id_data[0] = (uintptr_t)NULL;    // NULL means the sysimg
 }
 
 static void jl_restore_package_image_from_stream(ios_t *f) JL_GC_DISABLED

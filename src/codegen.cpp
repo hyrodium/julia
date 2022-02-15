@@ -4394,6 +4394,7 @@ static void emit_binding_store(jl_codectx_t &ctx, jl_binding_t *bnd, Value *bp, 
         StoreInst *v = ctx.builder.CreateAlignedStore(rval, bp, Align(sizeof(void*)));
         v->setOrdering(Order);
         tbaa_decorate(ctx.tbaa().tbaa_binding, v);
+        ctx.builder.CreateAssumption(ctx.builder.CreateIsNotNull(rval));
         emit_write_barrier_binding(ctx, literal_pointer_val(ctx, bnd), rval);
     }
     else {

@@ -855,6 +855,15 @@ static const auto jl_write_barrier_func = new JuliaFunction{
             AttributeSet(),
             {Attributes(C, {Attribute::ReadOnly})}); },
 };
+static const auto jl_write_barrier_binding_func = new JuliaFunction{
+    "julia.write_barrier_binding",
+    [](LLVMContext &C) { return FunctionType::get(getVoidTy(C),
+            {JuliaType::get_prjlvalue_ty(C)}, true); },
+    [](LLVMContext &C) { return AttributeList::get(C,
+            Attributes(C, {Attribute::NoUnwind, Attribute::NoRecurse, Attribute::InaccessibleMemOnly}),
+            AttributeSet(),
+            {Attributes(C, {Attribute::ReadOnly})}); },
+};
 static const auto jlisa_func = new JuliaFunction{
     XSTR(jl_isa),
     [](LLVMContext &C) {
@@ -4383,7 +4392,8 @@ static void emit_binding_store(jl_codectx_t &ctx, jl_binding_t *bnd, Value *bp, 
     if (!bnd->constp && bnd->ty && jl_isa(r, bnd->ty)) {
         StoreInst *v = ctx.builder.CreateAlignedStore(rval, bp, Align(sizeof(void*)));
         v->setOrdering(Order);
-        //tbaa_decorate(ctx.tbaa().tbaa_binding, v);
+        tbaa_decorate(ctx.tbaa().tbaa_binding, v);
+        emit_write_barrier_binding(ctx, bp, rval);
     }
     else {
         ctx.builder.CreateCall(prepare_call(jlcheckassign_func),
@@ -8099,6 +8109,7 @@ static void init_jit_functions(void)
     add_named_global(jl_loopinfo_marker_func, (void*)NULL);
     add_named_global(jl_typeof_func, (void*)NULL);
     add_named_global(jl_write_barrier_func, (void*)NULL);
+    add_named_global(jl_write_barrier_binding_func, (void*)NULL);
     add_named_global(jldlsym_func, &jl_load_and_lookup);
     add_named_global(jlgetcfunctiontrampoline_func, &jl_get_cfunction_trampoline);
     add_named_global(jlgetnthfieldchecked_func, &jl_get_nth_field_checked);

@@ -75,7 +75,7 @@ JL_DLLEXPORT void jl_write_compiler_output(void)
         if (jl_options.outputo) {
             jl_precompile_toplevel_module = (jl_module_t*)jl_array_ptr_ref(worklist, jl_array_len(worklist)-1);
             native_code = jl_precompile_worklist(worklist);
-            ios_t *s = jl_create_package_image(native_code, worklist);
+            ios_t *s = jl_create_system_image(native_code, worklist);
             assert(s);
             jl_dump_native(native_code,
                            jl_options.outputbc,
@@ -89,7 +89,7 @@ JL_DLLEXPORT void jl_write_compiler_output(void)
     else {
         ios_t *s = NULL;
         if (jl_options.outputo || jl_options.outputbc || jl_options.outputunoptbc || jl_options.outputasm)
-            s = jl_create_system_image(native_code);
+            s = jl_create_system_image(native_code, NULL);
 
         if (jl_options.outputji) {
             if (s == NULL) {

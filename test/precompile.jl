@@ -1278,3 +1278,89 @@ end
     @test any(mi -> mi.specTypes.parameters[2] === Any, mis)
     @test all(mi -> isa(mi.cache, Core.CodeInstance), mis)
 end
+
+## Static compilation of external modules
+
+# Currently this is limited to modules that do not trigger compilation
+# of external methods
+
+# Mirror of `Base.create_expr_cache`, with `--output-ji` replaced by `--output-o` and usage of default optimization level
+function create_expr_cache(pkg::Base.PkgId, input::String, output::String, concrete_deps::typeof(Base._concrete_dependencies), internal_stderr::IO = stderr, internal_stdout::IO = stdout)
+    @nospecialize internal_stderr internal_stdout
+    rm(output, force=true)   # Remove file if it exists
+    depot_path = map(abspath, DEPOT_PATH)
+    dl_load_path = map(abspath, Base.DL_LOAD_PATH)
+    load_path = map(abspath, Base.load_path())
+    path_sep = Sys.iswindows() ? ';' : ':'
+    any(path -> path_sep in path, load_path) &&
+        error("LOAD_PATH entries cannot contain $(repr(path_sep))")
+
+    deps_strs = String[]
+    function pkg_str(_pkg::Base.PkgId)
+        if _pkg.uuid === nothing
+            "Base.PkgId($(repr(_pkg.name)))"
+        else
+            "Base.PkgId(Base.UUID(\"$(_pkg.uuid)\"), $(repr(_pkg.name)))"
+        end
+    end
+    for (pkg, build_id) in concrete_deps
+        push!(deps_strs, "$(pkg_str(pkg)) => $(repr(build_id))")
+    end
+    deps_eltype = sprint(show, eltype(concrete_deps); context = :module=>nothing)
+    deps = deps_eltype * "[" * join(deps_strs, ",") * "]"
+    trace = ``
+    io = open(pipeline(`$(Base.julia_cmd()::Cmd)
+                       --output-o $output --output-incremental=yes
+                       --startup-file=no --history-file=no --warn-overwrite=yes
+                       --color=$(Base.have_color === nothing ? "auto" : Base.have_color ? "yes" : "no")
+                       $trace
+                       -`, stderr = internal_stderr, stdout = internal_stdout),
+              "w", stdout)
+    # write data over stdin to avoid the (unlikely) case of exceeding max command line size
+    write(io.in, """
+        Base.include_package_for_output($(pkg_str(pkg)), $(repr(abspath(input))), $(repr(depot_path)), $(repr(dl_load_path)),
+            $(repr(load_path)), $deps, $(repr(Base.source_path(nothing))))
+        """)
+    close(io.in)
+    return io
+end
+# A simplified version of `Base.compilecache` that calls our `create_expr_cache` above
+function compilecache(pkg::Base.PkgId, path::String, cachedir::String, internal_stderr::IO = stderr, internal_stdout::IO = stdout,
+                      ignore_loaded_modules::Bool = true)
+    @nospecialize internal_stderr internal_stdout
+    # decide where to put the resulting cache file
+    cachepath = joinpath(cachedir, pkg.name)
+
+    # build up the list of modules that we want the precompile process to preserve
+    concrete_deps = copy(Base._concrete_dependencies)
+    if ignore_loaded_modules
+        for (key, mod) in Base.loaded_modules
+            if !(mod === Main || mod === Core || mod === Base)
+                push!(concrete_deps, key => Base.module_build_id(mod))
+            end
+        end
+    end
+
+    mkpath(cachepath)
+    tmppath, tmpio = mktemp(cachepath)
+    close(tmpio)
+    return create_expr_cache(pkg, path, tmppath, concrete_deps, internal_stderr, internal_stdout)
+end
+
+@testset "static compilation" begin
+    srcdir   = mktempdir()
+    cachedir = mktempdir()
+    cnpath = joinpath(srcdir, "CacheNative.jl")
+    open(cnpath, "w") do io
+        write(io, """
+        module CacheNative
+        const data1 = [1, 2, 3]
+        const data2 = [4, 5, 6]
+        @noinline uses_data1() = data1[2]
+        precompile(uses_data1, ())
+        end
+        """)
+    end
+    p = compilecache(Base.PkgId("CacheNative"), cnpath, cachedir)
+    @test success(p)
+end

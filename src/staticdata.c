@@ -1993,10 +1993,7 @@ static void jl_save_system_image_to_stream(ios_t *f, jl_array_t *worklist) JL_GC
                 jl_serialize_value(&s, tag);
             }
         } else {
-            size_t nwl = jl_array_len(worklist);
-            for (i = 0; i < nwl; i++) {
-                jl_serialize_value(&s, jl_array_ptr_ref(worklist, i));
-            }
+            jl_serialize_value(&s, worklist);
         }
         jl_serialize_reachable(&s);
         // step 1.1: check for values only found in the generated code
@@ -2089,6 +2086,12 @@ static void jl_save_system_image_to_stream(ios_t *f, jl_array_t *worklist) JL_GC
         jl_finalize_serializer(&s, &reinit_list);
         jl_finalize_serializer(&s, &ccallable_list);
     }
+    // Write the build_id key
+    uint64_t buildid = 0;
+    if (worklist)
+        buildid = jl_worklist_key(worklist);
+    write_uint32(f, buildid >> 32);
+    write_uint32(f, buildid & (((uint64_t)1 << 32) - 1));
 
     assert(object_worklist.len == 0);
     arraylist_free(&object_worklist);
@@ -2154,7 +2157,7 @@ JL_DLLEXPORT void jl_set_sysimg_so(void *handle)
     sysimg_fptrs = jl_init_processor_sysimg(handle);
 }
 
-static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
+static jl_value_t *jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
 {
     JL_TIMING(SYSIMG_LOAD);
     int en = jl_gc_enable(0);
@@ -2171,6 +2174,8 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     arraylist_new(&s.relocs_list, 0);
     arraylist_new(&s.gctags_list, 0);
     jl_value_t **const*const tags = get_tags();
+
+    int incremental = jl_linkage_blobs.len > 0;
 
     // step 1: read section map
     assert(ios_pos(f) == 0 && f->bm == bm_mem);
@@ -2204,24 +2209,26 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     ios_skip(f, sizeof_fptr_record);
 
     // step 2: get references to special values
-    s.s = f;
-    size_t i;
-    for (i = 0; tags[i] != NULL; i++) {
-        jl_value_t **tag = tags[i];
-        *tag = jl_read_value(&s);
-    }
-    // set typeof extra-special values now that we have the type set by tags above
-    jl_astaggedvalue(jl_current_task)->header = (uintptr_t)jl_task_type | jl_astaggedvalue(jl_current_task)->header;
-    jl_astaggedvalue(jl_nothing)->header = (uintptr_t)jl_nothing_type | jl_astaggedvalue(jl_nothing)->header;
-    s.ptls->root_task->tls = jl_read_value(&s);
-    jl_gc_wb(s.ptls->root_task, s.ptls->root_task->tls);
-    jl_init_int32_int64_cache();
-    jl_init_box_caches();
+    if (!incremental) {
+        s.s = f;
+        size_t i;
+        for (i = 0; tags[i] != NULL; i++) {
+            jl_value_t **tag = tags[i];
+            *tag = jl_read_value(&s);
+        }
+        // set typeof extra-special values now that we have the type set by tags above
+        jl_astaggedvalue(jl_current_task)->header = (uintptr_t)jl_task_type | jl_astaggedvalue(jl_current_task)->header;
+        jl_astaggedvalue(jl_nothing)->header = (uintptr_t)jl_nothing_type | jl_astaggedvalue(jl_nothing)->header;
+        s.ptls->root_task->tls = jl_read_value(&s);
+        jl_gc_wb(s.ptls->root_task, s.ptls->root_task->tls);
+        jl_init_int32_int64_cache();
+        jl_init_box_caches();
 
-    uint32_t gs_ctr = read_uint32(f);
-    jl_atomic_store_release(&jl_world_counter, read_uint32(f));
-    jl_typeinf_world = read_uint32(f);
-    jl_set_gs_ctr(gs_ctr);
+        uint32_t gs_ctr = read_uint32(f);
+        jl_atomic_store_release(&jl_world_counter, read_uint32(f));
+        jl_typeinf_world = read_uint32(f);
+        jl_set_gs_ctr(gs_ctr);
+    }
     assert(link_ids == NULL);
     size_t nlinks = read_uint32(f);
     if (nlinks > 0) {
@@ -2236,9 +2243,11 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     jl_read_symbols(&s);
     ios_close(&symbols);
 
-    sysimg_base = &sysimg.buf[0];
-    sysimg_relocs = &relocs.buf[0];
-    jl_gc_set_permalloc_region((void*)sysimg_base, (void*)(sysimg_base + sysimg.size));
+    if (!incremental) {
+        sysimg_base = &sysimg.buf[0];
+        sysimg_relocs = &relocs.buf[0];
+        jl_gc_set_permalloc_region((void*)sysimg_base, (void*)(sysimg_base + sysimg.size));
+    }
 
     s.s = &sysimg;
     jl_read_relocations(&s, GC_OLD_MARKED); // gctags
@@ -2293,137 +2302,17 @@ static void jl_restore_system_image_from_stream(ios_t *f) JL_GC_DISABLED
     // Prepare for later external linkage against the sysimg
     arraylist_push(&jl_linkage_blobs, sysimg_base);
     arraylist_push(&jl_linkage_blobs, sysimg_base + sizeof_sysimg);
-    assert(jl_build_ids == NULL);
-    jl_build_ids = jl_alloc_array_1d(jl_array_uint64_type, 0);
+    uint64_t buildid = (((uint64_t)read_uint32(f)) << 32) | read_uint32(f);
+    if (!jl_build_ids)
+        jl_build_ids = jl_alloc_array_1d(jl_array_uint64_type, 0);
     jl_array_grow_end(jl_build_ids, 1);
     uint64_t *build_id_data = (uint64_t*)jl_array_data(jl_build_ids);
-    assert(jl_array_len(jl_build_ids) == 1);  // FIXME
-    build_id_data[0] = (uintptr_t)NULL;    // NULL means the sysimg
-}
+    build_id_data[jl_array_len(jl_build_ids)-1] = buildid;
 
-static void jl_restore_package_image_from_stream(ios_t *f) JL_GC_DISABLED
-{
-    JL_TIMING(SYSIMG_LOAD);
-    int en = jl_gc_enable(0);
-    jl_init_serializer2(0);
-    ios_t sysimg, const_data, symbols, relocs, gvar_record, fptr_record;
-    jl_serializer_state s;
-    s.s = NULL;
-    s.const_data = &const_data;
-    s.symbols = &symbols;
-    s.relocs = &relocs;
-    s.gvar_record = &gvar_record;
-    s.fptr_record = &fptr_record;
-    s.ptls = jl_current_task->ptls;
-    arraylist_new(&s.relocs_list, 0);
-    arraylist_new(&s.gctags_list, 0);
-    // jl_value_t **const*const tags = get_tags();
-
-    // step 1: read section map
-    assert(ios_pos(f) == 0 && f->bm == bm_mem);
-    size_t sizeof_sysimg = read_uint32(f);
-    jl_printf(JL_STDOUT, "sizeof_sysimg %ld\n", sizeof_sysimg);
-    ios_static_buffer(&sysimg, f->buf, sizeof_sysimg + sizeof(uint32_t));
-    ios_skip(f, sizeof_sysimg);
-
-    size_t sizeof_constdata = read_uint32(f);
-    jl_printf(JL_STDOUT, "sizeof_constdata %ld\n", sizeof_constdata);
-    // realign stream to max-alignment for data
-    ios_seek(f, LLT_ALIGN(ios_pos(f), 16));
-    ios_static_buffer(&const_data, f->buf + f->bpos, sizeof_constdata);
-    ios_skip(f, sizeof_constdata);
-
-    size_t sizeof_symbols = read_uint32(f);
-    jl_printf(JL_STDOUT, "sizeof_symbols %ld\n", sizeof_symbols);
-    ios_static_buffer(&symbols, f->buf + f->bpos, sizeof_symbols);
-    ios_skip(f, sizeof_symbols);
-
-    size_t sizeof_relocations = read_uint32(f);
-    jl_printf(JL_STDOUT, "sizeof_relocations %ld\n", sizeof_relocations);
-    assert(!ios_eof(f));
-    ios_static_buffer(&relocs, f->buf + f->bpos, sizeof_relocations);
-    ios_skip(f, sizeof_relocations);
-
-    size_t sizeof_gvar_record = read_uint32(f);
-    jl_printf(JL_STDOUT, "sizeof_gvar_record %ld\n", sizeof_gvar_record);
-    assert(!ios_eof(f));
-    ios_static_buffer(&gvar_record, f->buf + f->bpos, sizeof_gvar_record);
-    ios_skip(f, sizeof_gvar_record);
-
-    size_t sizeof_fptr_record = read_uint32(f);
-    jl_printf(JL_STDOUT, "sizeof_fptr_record %ld\n", sizeof_fptr_record);
-    assert(!ios_eof(f));
-    ios_static_buffer(&fptr_record, f->buf + f->bpos, sizeof_fptr_record);
-    ios_skip(f, sizeof_fptr_record);
-
-    // step 2: get references to special values
-    // s.s = f;
-    // uint32_t gs_ctr = read_uint32(f);
-    // read_uint32(f);  // world counter
-    // jl_atomic_store_release(&jl_world_counter, read_uint32(f));
-    // read_uint32(f);
-    // jl_typeinf_world = read_uint32(f);
-    // jl_set_gs_ctr(gs_ctr);
-    // s.s = NULL;
-
-    // step 3: apply relocations
-    assert(!ios_eof(f));
-    jl_read_symbols(&s);
-    ios_close(&symbols);
-    // jl_printf(JL_STDOUT, "Pos after symbols: %ld\n", ios_pos(f));
-
-    // char *pkgimg_base = &sysimg.buf[0];
-    // char *pkgimg_relocs = &relocs.buf[0];
-    // jl_gc_set_permalloc_region((void*)pkgimg_base, (void*)(pkgimg_base + sysimg.size));
-
-    s.s = &sysimg;
-    jl_read_relocations(&s, GC_OLD_MARKED); // gctags
-    size_t sizeof_tags = ios_pos(&relocs);
-    (void)sizeof_tags;
-    jl_read_relocations(&s, 0); // general relocs
-    // jl_printf(JL_STDOUT, "Pos after relocations: %ld\n", ios_pos(f));
-    ios_close(&relocs);
-    ios_close(&const_data);
-    jl_update_all_gvars(&s); // gvars relocs
-    ios_close(&gvar_record);
-    s.s = NULL;
-
-    s.s = f;
-    // reinit items except ccallables
-    jl_finalize_deserializer(&s);
-    s.s = NULL;
-
-    if (0) {
-        printf("sysimg size breakdown:\n"
-               "     sys data: %8u\n"
-               "  isbits data: %8u\n"
-               "      symbols: %8u\n"
-               "    tags list: %8u\n"
-               "   reloc list: %8u\n"
-               "    gvar list: %8u\n"
-               "    fptr list: %8u\n",
-            (unsigned)sizeof_sysimg,
-            (unsigned)sizeof_constdata,
-            (unsigned)sizeof_symbols,
-            (unsigned)sizeof_tags,
-            (unsigned)(sizeof_relocations - sizeof_tags),
-            (unsigned)sizeof_gvar_record,
-            (unsigned)sizeof_fptr_record);
-    }
-
-    s.s = &sysimg;
-    jl_update_all_fptrs(&s); // fptr relocs and registration
-    // reinit ccallables, which require codegen to be initialized
-    s.s = f;
-    jl_finalize_deserializer(&s);
-
-    ios_close(&fptr_record);
-    ios_close(&sysimg);
-    s.s = NULL;
-
-    jl_gc_reset_alloc_count();
-    jl_gc_enable(en);
-    jl_cleanup_serializer2();
+    if (!incremental)
+        return jl_nothing;
+    // Get the worklist
+    return jl_valueof(sysimg_base);
 }
 
 // TODO: need to enforce that the alignment of the buffer is suitable for vectors
@@ -2459,47 +2348,18 @@ JL_DLLEXPORT void jl_restore_system_image(const char *fname)
     }
 }
 
-JL_DLLEXPORT void jl_restore_system_image_data(const char *buf, size_t len)
+JL_DLLEXPORT jl_value_t *jl_restore_system_image_data(const char *buf, size_t len)
 {
     ios_t f;
     JL_SIGATOMIC_BEGIN();
     ios_static_buffer(&f, (char*)buf, len);
-    jl_restore_system_image_from_stream(&f);
+    jl_value_t *worklist = jl_restore_system_image_from_stream(&f);
     ios_close(&f);
     JL_SIGATOMIC_END();
+    return worklist;
 }
 
-// JL_DLLEXPORT void jl_restore_package_image(const char *fname)
-// {
-//     ios_t f;
-//     if (ios_file(&f, fname, 1, 0, 0, 0) == NULL)
-//         jl_errorf("Package image file \"%s\" not found.", fname);
-//     ios_bufmode(&f, bm_none);
-//     JL_SIGATOMIC_BEGIN();
-//     ios_seek_end(&f);
-//     size_t len = ios_pos(&f);
-//     char *sysimg = (char*)jl_gc_perm_alloc(len, 0, 64, 0);
-//     ios_seek(&f, 0);
-//     if (ios_readall(&f, sysimg, len) != len)
-//         jl_errorf("Error reading package image file.");
-//     ios_close(&f);
-//     ios_static_buffer(&f, sysimg, len);
-//     jl_restore_package_image_from_stream(&f);
-//     ios_close(&f);
-//     JL_SIGATOMIC_END();
-// }
-
-void jl_restore_package_image_data_(const char *buf, size_t len)
-{
-    ios_t f;
-    JL_SIGATOMIC_BEGIN();
-    ios_static_buffer(&f, (char*)buf, len);
-    jl_restore_package_image_from_stream(&f);
-    ios_close(&f);
-    JL_SIGATOMIC_END();
-}
-
-JL_DLLEXPORT void jl_restore_package_image_from_file(const char *fname)
+JL_DLLEXPORT jl_value_t *jl_restore_package_image_from_file(const char *fname)
 {
     void *pkgimg_handle = dlopen(fname, RTLD_NOW);
     const char *pkgimg_data;
@@ -2507,7 +2367,7 @@ JL_DLLEXPORT void jl_restore_package_image_from_file(const char *fname)
     size_t *plen;
     jl_dlsym(pkgimg_handle, "jl_system_image_size", (void **)&plen, 1);
     jl_printf(JL_STDOUT, "pkg_img_size %ld\n", *plen);
-    jl_restore_package_image_data_(pkgimg_data, *plen);
+    return jl_restore_system_image_data(pkgimg_data, *plen);
 }
 
 // --- init ---

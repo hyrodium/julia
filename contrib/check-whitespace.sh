@@ -24,7 +24,6 @@ file_patterns='
 *Makefile
 '
 
-# TODO: Look also for trailing empty lines, and missing '\n' after the last line
 if git --no-pager grep --color -n --full-name -P '[\s ]+$' -- $file_patterns; then
     echo "Error: trailing whitespace found in source file(s)"
     echo ""
@@ -35,5 +34,16 @@ if git --no-pager grep --color -n --full-name -P '[\s ]+$' -- $file_patterns; t
     echo "and then a forced push of the correct branch"
     exit 1
 fi
+
+for file in $(git --no-pager ls-files -- $file_patterns); do
+    if test "$(tail -c 1 $file)" != "$(echo)"; then
+        echo "Error: $file has no trailing newline"
+        exit 1
+    fi
+    if test "$(tail -c 2 $file)" = "$(echo; echo)"; then
+        echo "Error: $file has multiple trailing newlines"
+        exit 1
+    fi
+done
 
 echo "Whitespace check found no issues"

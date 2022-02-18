@@ -15,4 +15,3 @@ steps:
             - SECRET_KEY="U2FsdGVkX18tb7st0SuQAvh4Yv4xENxOAu8q9XkmOeDVKBNY4FngEwK3xmiKUqaS"
     commands: |
       echo "SECRET_KEY: $${SECRET_KEY}"
-

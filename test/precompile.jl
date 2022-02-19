@@ -787,6 +787,8 @@ precompile_test_harness("code caching") do dir
     end
 
     StaleA = :StaleA_0xab07d60518763a7e
+    StaleB = :StaleB_0xab07d60518763a7e
+    StaleC = :StaleC_0xab07d60518763a7e
     write(joinpath(dir, "$StaleA.jl"),
         """
         module $StaleA
@@ -806,7 +808,6 @@ precompile_test_harness("code caching") do dir
         end
         """
     )
-    StaleB = :StaleB_0xab07d60518763a7e
     write(joinpath(dir, "$StaleB.jl"),
         """
         module $StaleB
@@ -825,7 +826,6 @@ precompile_test_harness("code caching") do dir
         end
         """
     )
-    StaleC = :StaleC_0xab07d60518763a7e
     write(joinpath(dir, "$StaleC.jl"),
         """
         module $StaleC
@@ -852,7 +852,7 @@ precompile_test_harness("code caching") do dir
     world = Base.get_world_counter()
     m = only(methods(MA.use_stale))
     mi = m.specializations[1]
-    @test_broken hasvalid(mi, world)   # it should have been re-inferred by StaleC
+    @test hasvalid(mi, world)   # was re-inferred by StaleC
     m = only(methods(MA.build_stale))
     mis = filter(!isnothing, collect(m.specializations))
     @test length(mis) == 2

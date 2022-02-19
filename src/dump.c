@@ -2205,10 +2205,12 @@ void remove_code_instance_from_validation(jl_code_instance_t *codeinst)
 
 static void jl_insert_method_instances(jl_array_t *list)
 {
-    size_t i, l = jl_array_len(list), ll = l;
+    size_t i, l = jl_array_len(list);
     // Validate the MethodInstances
+    jl_array_t *valids = jl_alloc_array_1d(jl_array_uint8_type, l);
+    memset(jl_array_data(valids), 1, l);
     size_t world = jl_atomic_load_acquire(&jl_world_counter);
-    for (i = 0; i < ll; i++) {
+    for (i = 0; i < l; i++) {
         jl_method_instance_t *mi = (jl_method_instance_t*)jl_array_ptr_ref(list, i);
         assert(jl_is_method_instance(mi));
         if (jl_is_method(mi->def.method)) {
@@ -2216,6 +2218,7 @@ static void jl_insert_method_instances(jl_array_t *list)
             jl_methtable_t *mt = jl_method_table_for(mi->specTypes);
             jl_value_t *mworld = jl_methtable_lookup(mt, mi->specTypes, world);
             if (jl_is_method(mworld) && mi->def.method != (jl_method_t*)mworld) {
+                jl_array_uint8_set(valids, i, 0);
                 invalidate_backedges(&remove_code_instance_from_validation, mi, world, "jl_insert_method_instance");
                 // The codeinst of this mi haven't yet been removed
                 jl_code_instance_t *codeinst = mi->cache;
@@ -2227,13 +2230,10 @@ static void jl_insert_method_instances(jl_array_t *list)
                     jl_array_ptr_1d_push(_jl_debug_method_invalidation, mworld);
                     jl_array_ptr_1d_push(_jl_debug_method_invalidation, jl_cstr_to_string("jl_method_table_insert")); // GC disabled
                 }
-                jl_array_ptr_set(list, i, jl_array_ptr_ref(list, ll-1));
-                jl_array_ptr_set(list, ll-1, mi);
-                ll--;
             }
         }
     }
-    // While it's tempting to just remove the invalidated MIs altogether (loop only up to `ll`),
+    // While it's tempting to just remove the invalidated MIs altogether,
     // this hurts the ability of SnoopCompile to diagnose problems.
     for (i = 0; i < l; i++) {
         jl_method_instance_t *mi = (jl_method_instance_t*)jl_array_ptr_ref(list, i);
@@ -2278,6 +2278,22 @@ static void jl_insert_method_instances(jl_array_t *list)
                         if (!found)
                             jl_array_ptr_1d_push(milive->backedges, (jl_value_t*)belive);
                     }
+                }
+            }
+            // Additionally, if we have CodeInstance(s) and the running CodeInstance is world-limited, transfer it
+            if (mi->cache && jl_array_uint8_ref(valids, i)) {
+                if (!milive->cache || milive->cache->max_world < ~(size_t)0) {
+                    jl_code_instance_t *cilive = milive->cache, *ci;
+                    milive->cache = mi->cache;
+                    jl_gc_wb(milive, milive->cache);
+                    ci = mi->cache;
+                    ci->def = milive;
+                    while (ci->next) {
+                        ci = ci->next;
+                        ci->def = milive;
+                    }
+                    ci->next = cilive;
+                    jl_gc_wb(ci, ci->next);
                 }
             }
         }

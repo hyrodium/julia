@@ -23,6 +23,11 @@ struct LateLowerGC : PassInfoMixin<LateLowerGC> {
     static bool isRequired() { return true; }
 };
 
+struct LowerExcHandlers : PassInfoMixin<LowerExcHandlers> {
+    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+    static bool isRequired() { return true; }
+};
+
 // Module Passes
 struct CPUFeatures : PassInfoMixin<CPUFeatures> {
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);

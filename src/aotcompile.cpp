@@ -891,6 +891,10 @@ static void registerCallbacks(PassBuilder &PB) {
                 PM.addPass(LateLowerGC());
                 return true;
             }
+            if (Name == "LowerExcHandlers") {
+                PM.addPass(LowerExcHandlers());
+                return true;
+            }
             return false;
         });
 

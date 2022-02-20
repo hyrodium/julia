@@ -922,6 +922,10 @@ static void registerCallbacks(PassBuilder &PB) {
                 PM.addPass(FinalLowerGCPass());
                 return true;
             }
+            if (Name == "MultiVersioning") {
+                PM.addPass(MultiVersioning());
+                return true;
+            }
             return false;
         });
 

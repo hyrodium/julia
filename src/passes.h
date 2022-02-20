@@ -55,6 +55,12 @@ struct FinalLowerGCPass : PassInfoMixin<LateLowerGC> {
     static bool isRequired() { return true; }
 };
 
+struct MultiVersioning : PassInfoMixin<MultiVersioning> {
+    PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+    static bool isRequired() { return true; }
+};
+
+
 // Loop Passes
 struct JuliaLICMPass : PassInfoMixin<JuliaLICMPass> {
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &AM,

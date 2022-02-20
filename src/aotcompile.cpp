@@ -895,6 +895,11 @@ static void registerCallbacks(PassBuilder &PB) {
                 PM.addPass(LowerExcHandlers());
                 return true;
             }
+            if (Name == "GCInvariantVerifier") {
+                // TODO: Parse option and allow users to set `Strong`
+                PM.addPass(GCInvariantVerifierPass());
+                return true;
+            }
             return false;
         });
 

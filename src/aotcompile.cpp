@@ -926,6 +926,10 @@ static void registerCallbacks(PassBuilder &PB) {
                 PM.addPass(MultiVersioning());
                 return true;
             }
+            if (Name == "LowerPTLS") {
+                PM.addPass(LowerPTLSPass());
+                return true;
+            }
             return false;
         });
 
